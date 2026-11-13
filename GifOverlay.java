@@ -29,7 +29,19 @@ public final class GifOverlay {
     private static final int RESIZE_HANDLE_SIZE = 16;
     private final String windowTitle = "GifOverlay " + UUID.randomUUID();
     private final JFrame window = new JFrame(windowTitle);
-    private final JFrame controls = new JFrame("GifOverlay");
+    private final JFrame controls;
+    private final GifOverlay owner;
+    private final java.util.Map<Component, GifOverlay> overlays = new java.util.LinkedHashMap<>();
+    private boolean disposed;
+
+    public GifOverlay() {
+        this(null);
+    }
+
+    private GifOverlay(GifOverlay owner) {
+        this.owner = owner;
+        controls = owner == null ? new JFrame("GifOverlay") : owner.controls;
+    }
     private final Drawing drawing = new Drawing();
     private final Timer timer = new Timer(100, event -> advance());
     private final JButton openGif = new JButton("애니메이션 없음");
@@ -70,6 +82,144 @@ public final class GifOverlay {
                 ? Path.of(System.getProperty("user.home")) : Path.of(appData);
         settingsFile = base.resolve(bundled ? "AnokoOverlay" : "GifOverlay").resolve("settings.properties");
         restoreSettings();
+        installTray();
+        JButton minimize = new JButton("트레이로 최소화");
+        minimize.setToolTipText("재생을 계속하면서 설정 창을 트레이로 숨깁니다.");
+        minimize.addActionListener(event -> controls.setVisible(false));
+        JButton exit = new JButton("완전 종료");
+        exit.setToolTipText("재생을 멈추고 GifOverlay를 종료합니다.");
+        exit.addActionListener(event -> close());
+        JPanel first = createOverlayPanel(minimize, exit);
+        controls.setContentPane(bundled ? first : createTabs(first));
+        controls.pack();
+        controls.setLocationByPlatform(true);
+
+        minimize.setEnabled(tray != null);
+        controls.setDefaultCloseOperation(tray == null
+                ? WindowConstants.EXIT_ON_CLOSE : WindowConstants.HIDE_ON_CLOSE);
+        controls.setVisible(true);
+        restoreMedia();
+        overlays.values().stream().filter(overlay -> overlay != this).forEach(GifOverlay::restoreMedia);
+    }
+
+    private JTabbedPane tabs;
+
+    private JPanel createTabs(JPanel first) {
+        tabs = new JTabbedPane();
+        tabs.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
+        var addTab = new JPanel();
+        tabs.addTab("+", null, addTab, "오버레이 탭 추가");
+        int count = Math.clamp(savedInt("tabs.count", 1), 1, 100);
+        installTab(first, this);
+        for (int index = 1; index < count; index++) {
+            addOverlayTab(index);
+        }
+        tabs.setSelectedIndex(Math.clamp(savedInt("tabs.selected", 0), 0, count - 1));
+        tabs.addChangeListener(event -> {
+            if (tabs.getSelectedComponent() == addTab) {
+                SwingUtilities.invokeLater(() -> {
+                    if (tabs.getSelectedComponent() != addTab) {
+                        return;
+                    }
+                    if (overlays.size() >= 100) {
+                        tabs.setSelectedIndex(overlays.size() - 1);
+                        return;
+                    }
+                    tabs.setSelectedComponent(addOverlayTab(-1));
+                    saveSettings();
+                });
+            } else {
+                saveSettings();
+            }
+        });
+        var content = new JPanel(new BorderLayout());
+        content.add(tabs, BorderLayout.CENTER);
+        return content;
+    }
+
+    private JPanel addOverlayTab(int restoredIndex) {
+        var overlay = new GifOverlay(this);
+        overlay.tray = tray;
+        if (restoredIndex >= 0) {
+            String prefix = "tabs." + restoredIndex + ".";
+            for (String key : savedSettings.stringPropertyNames()) {
+                if (key.startsWith(prefix)) {
+                    overlay.savedSettings.setProperty(key.substring(prefix.length()), savedSettings.getProperty(key));
+                }
+            }
+            overlay.applySavedControls();
+        }
+        overlay.savedSettings.putIfAbsent("tabName", "오버레이 " + (overlays.size() + 1));
+        var minimize = new JButton("트레이로 최소화");
+        minimize.setEnabled(tray != null);
+        minimize.addActionListener(event -> controls.setVisible(false));
+        var exit = new JButton("완전 종료");
+        exit.addActionListener(event -> close());
+        JPanel panel = overlay.createOverlayPanel(minimize, exit);
+        installTab(panel, overlay);
+        return panel;
+    }
+
+    private void installTab(JPanel panel, GifOverlay overlay) {
+        String title = overlay.savedSettings.getProperty("tabName", "오버레이 1");
+        int index = tabs.getTabCount() - 1;
+        tabs.insertTab(title, null, panel, null, index);
+        overlays.put(panel, overlay);
+        var header = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        header.setOpaque(false);
+        var label = new JLabel(title);
+        label.setToolTipText("더블클릭하여 이름 변경");
+        label.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return;
+                }
+                tabs.setSelectedComponent(panel);
+                if (event.getClickCount() == 2) {
+                    String name = JOptionPane.showInputDialog(controls, "오버레이 이름", label.getText());
+                    if (name != null && !name.isBlank()) {
+                        String trimmed = name.strip();
+                        overlay.savedSettings.setProperty("tabName", trimmed);
+                        label.setText(trimmed);
+                        tabs.setTitleAt(tabs.indexOfComponent(panel), trimmed);
+                        saveSettings();
+                    }
+                }
+            }
+        });
+        header.add(label);
+        if (overlay != this) {
+            var remove = new JButton("−");
+            remove.setPreferredSize(new Dimension(19, 19));
+            remove.setBorder(BorderFactory.createEmptyBorder());
+            remove.setOpaque(false);
+            remove.setContentAreaFilled(false);
+            remove.setForeground(new Color(73, 89, 112));
+            remove.setRolloverEnabled(true);
+            remove.getModel().addChangeListener(event -> {
+                boolean hovered = remove.getModel().isRollover();
+                remove.setContentAreaFilled(hovered);
+                remove.setForeground(hovered ? new Color(158, 46, 58) : new Color(73, 89, 112));
+            });
+            remove.setToolTipText("이 오버레이 닫기");
+            remove.getAccessibleContext().setAccessibleName("이 오버레이 닫기");
+            remove.addActionListener(event -> {
+                if (tabs.getSelectedComponent() == panel) {
+                    tabs.setSelectedIndex(tabs.indexOfComponent(panel) - 1);
+                }
+                overlays.remove(panel);
+                tabs.remove(panel);
+                overlay.disposeOverlay();
+                saveSettings();
+            });
+            header.add(remove);
+        }
+        tabs.setTabComponentAt(index, header);
+    }
+
+
+    private JPanel createOverlayPanel(JButton minimize, JButton exit) {
         window.setUndecorated(true);
         window.setBackground(new Color(0, 0, 0, 0));
         window.setAlwaysOnTop(true);
@@ -191,6 +341,7 @@ public final class GifOverlay {
                 styles.setClickThrough(windowTitle, requested);
                 drawing.showResizeFeedback(false, false);
                 drawing.repaint();
+                saveSettings();
             } catch (Throwable failure) {
                 clickThrough.setSelected(!requested);
                 showError("클릭 방지 설정을 바꾸지 못했습니다.", failure);
@@ -253,13 +404,7 @@ public final class GifOverlay {
         settings.add(volume);
         settings.add(sound);
         settings.add(clickThrough);
-        JButton minimize = new JButton("트레이로 최소화");
-        minimize.setToolTipText("재생을 계속하면서 설정 창을 트레이로 숨깁니다.");
-        minimize.addActionListener(event -> controls.setVisible(false));
-        JButton exit = new JButton("완전 종료");
-        exit.setToolTipText("재생을 멈추고 GifOverlay를 종료합니다.");
         styleButton(exit, new Color(158, 46, 58));
-        exit.addActionListener(event -> close());
         scale.addChangeListener(event -> {
             resizeOverlay();
             if (!resizing) {
@@ -327,15 +472,10 @@ public final class GifOverlay {
                 }
             });
         }
-        controls.setContentPane(content);
-        controls.pack();
-        controls.setLocationByPlatform(true);
+        return content;
+    }
 
-        installTray();
-        minimize.setEnabled(tray != null);
-        controls.setDefaultCloseOperation(tray == null
-                ? WindowConstants.EXIT_ON_CLOSE : WindowConstants.HIDE_ON_CLOSE);
-        controls.setVisible(true);
+    private void restoreMedia() {
         if (bundled) {
             loadBundledMedia();
         } else {
@@ -474,10 +614,12 @@ public final class GifOverlay {
     }
 
     private void showLibrary() {
+        GifOverlay libraryOwner = owner == null ? this : owner;
+        Properties presets = libraryOwner.savedSettings;
         var model = new DefaultListModel<String>();
-        savedSettings.stringPropertyNames().stream()
+        presets.stringPropertyNames().stream()
                 .filter(key -> key.startsWith("preset.") && key.endsWith(".name"))
-                .sorted(java.util.Comparator.comparing(savedSettings::getProperty))
+                .sorted(java.util.Comparator.comparing(presets::getProperty))
                 .forEach(model::addElement);
         var list = new JList<>(model);
         var previews = new java.util.HashMap<String, LibraryPreview>();
@@ -494,7 +636,7 @@ public final class GifOverlay {
         });
         java.util.function.Consumer<String> refreshPreview = key -> {
             String prefix = key.substring(0, key.length() - 4);
-            String path = savedSettings.getProperty(prefix + "animationFile", "");
+            String path = presets.getProperty(prefix + "animationFile", "");
             previews.remove(key);
             list.repaint();
             var task = new SwingWorker<LibraryPreview, Void>() {
@@ -534,10 +676,10 @@ public final class GifOverlay {
             String prefix = key.substring(0, key.length() - 4);
             var preview = previews.get(key);
             String status = preview == null ? "불러오는 중" : preview.status();
-            String name = savedSettings.getProperty(key);
+            String name = presets.getProperty(key);
             renderer.getListCellRendererComponent(view,
                     status.isEmpty() ? name : name + " · " + status, index, selected, focused);
-            boolean hasWav = !savedSettings.getProperty(prefix + "soundFile", "").isBlank();
+            boolean hasWav = !presets.getProperty(prefix + "soundFile", "").isBlank();
             renderer.setIcon(new LibraryPreviewIcon(preview == null ? null : preview.image(), hasWav));
             renderer.setIconTextGap(10);
             return renderer;
@@ -549,8 +691,8 @@ public final class GifOverlay {
             String key = list.getSelectedValue();
             if (key != null) {
                 String prefix = key.substring(0, key.length() - 4);
-                File image = new File(savedSettings.getProperty(prefix + "animationFile", ""));
-                String wav = savedSettings.getProperty(prefix + "soundFile", "");
+                File image = new File(presets.getProperty(prefix + "animationFile", ""));
+                String wav = presets.getProperty(prefix + "soundFile", "");
                 File soundPath = wav.isEmpty() ? null : new File(wav);
                 if (!image.isFile() || (soundPath != null && !soundPath.isFile())) {
                     JOptionPane.showMessageDialog(dialog, "저장한 파일을 찾을 수 없습니다. 경로 변경에서 다시 지정하세요.");
@@ -583,24 +725,24 @@ public final class GifOverlay {
                     "sound", "resolution", "customDelay", "delayMs")) {
                 String value = savedSettings.getProperty(key);
                 if (value != null && (!key.equals("soundFile") || audio != null)) {
-                    savedSettings.setProperty(prefix + key, value);
+                    presets.setProperty(prefix + key, value);
                 }
             }
-            savedSettings.setProperty(prefix + "name", name.strip());
+            presets.setProperty(prefix + "name", name.strip());
             model.addElement(prefix + "name");
             refreshPreview.accept(prefix + "name");
             list.setSelectedIndex(model.size() - 1);
-            saveSettings();
+            libraryOwner.saveSettings();
         });
         JButton rename = new JButton("이름 변경");
         rename.addActionListener(event -> {
             String key = list.getSelectedValue();
             if (key != null) {
-                String name = JOptionPane.showInputDialog(dialog, "조합 이름", savedSettings.getProperty(key));
+                String name = JOptionPane.showInputDialog(dialog, "조합 이름", presets.getProperty(key));
                 if (name != null && !name.isBlank()) {
-                    savedSettings.setProperty(key, name.strip());
+                    presets.setProperty(key, name.strip());
                     list.repaint();
-                    saveSettings();
+                    libraryOwner.saveSettings();
                 }
             }
         });
@@ -615,14 +757,14 @@ public final class GifOverlay {
                     JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
             String prefix = key.substring(0, key.length() - 4);
             if (choice == 2) {
-                savedSettings.remove(prefix + "soundFile");
+                presets.remove(prefix + "soundFile");
             } else if (choice >= 0) {
                 File file = choice == 0 ? chooseFile(dialog, "GIF 또는 오버레이 ZIP", "gif", "zip")
                         : chooseFile(dialog, "WAV 오디오", "wav");
                 if (file == null) {
                     return;
                 }
-                savedSettings.setProperty(prefix + (choice == 0 ? "animationFile" : "soundFile"),
+                presets.setProperty(prefix + (choice == 0 ? "animationFile" : "soundFile"),
                         file.getAbsolutePath());
             } else {
                 return;
@@ -631,7 +773,7 @@ public final class GifOverlay {
                 refreshPreview.accept(key);
             }
             list.repaint();
-            saveSettings();
+            libraryOwner.saveSettings();
         });
         JButton delete = new JButton("삭제");
         load.setToolTipText("선택한 조합을 현재 오버레이에 적용합니다.");
@@ -644,14 +786,14 @@ public final class GifOverlay {
             if (key != null && JOptionPane.showConfirmDialog(dialog, "저장한 조합을 삭제할까요?",
                     "보관함", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                 String prefix = key.substring(0, key.length() - 4);
-                savedSettings.keySet().removeIf(item -> item.toString().startsWith(prefix));
+                presets.keySet().removeIf(item -> item.toString().startsWith(prefix));
                 model.removeElement(key);
                 previews.remove(key);
                 var task = previewTasks.remove(key);
                 if (task != null) {
                     task.cancel(true);
                 }
-                saveSettings();
+                libraryOwner.saveSettings();
             }
         });
         for (JButton button : List.of(load, add, rename, relink, delete)) {
@@ -766,6 +908,10 @@ public final class GifOverlay {
                 savedSettings.clear();
             }
         }
+        applySavedControls();
+    }
+
+    private void applySavedControls() {
         scale.setValue(Math.clamp(savedInt("scale", 100), 10, 400));
         volume.setValue(Math.clamp(savedInt("volume", 100), 0, 100));
         sound.setSelected(Boolean.parseBoolean(savedSettings.getProperty("sound", "false")));
@@ -776,14 +922,19 @@ public final class GifOverlay {
 
     private int savedInt(String key, int fallback) {
         try {
-            return Integer.parseInt(savedSettings.getProperty(key));
+            return Integer.parseInt(setting(key));
         } catch (NumberFormatException failure) {
             return fallback;
         }
     }
 
+    private String setting(String key) {
+        Properties source = owner != null && key.startsWith("preset.") ? owner.savedSettings : savedSettings;
+        return source.getProperty(key);
+    }
+
     private void saveSettings() {
-        if (settingsFile == null) {
+        if (disposed) {
             return;
         }
         savedSettings.setProperty("scale", scale.getValue().toString());
@@ -793,10 +944,35 @@ public final class GifOverlay {
             savedSettings.setProperty("resolution", resolution.getSelectedItem().toString());
             savedSettings.setProperty("customDelay", Boolean.toString(customDelay.isSelected()));
             savedSettings.setProperty("delayMs", delayMs.getValue().toString());
+            if (window.isVisible()) {
+                savedSettings.setProperty("clickThrough", Boolean.toString(clickThrough.isSelected()));
+            }
         }
         if (window.isVisible()) {
             savedSettings.setProperty("x", Integer.toString(window.getX()));
             savedSettings.setProperty("y", Integer.toString(window.getY()));
+        }
+        GifOverlay root = owner == null ? this : owner;
+        root.writeSettings();
+    }
+
+    private void writeSettings() {
+        if (settingsFile == null) {
+            return;
+        }
+        if (tabs != null) {
+            savedSettings.keySet().removeIf(key -> key.toString().startsWith("tabs."));
+            savedSettings.setProperty("tabs.count", Integer.toString(overlays.size()));
+            savedSettings.setProperty("tabs.selected",
+                    Integer.toString(Math.min(tabs.getSelectedIndex(), overlays.size() - 1)));
+            int index = 0;
+            for (GifOverlay overlay : overlays.values()) {
+                if (index != 0) {
+                    String prefix = "tabs." + index + ".";
+                    overlay.savedSettings.forEach((key, value) -> savedSettings.put(prefix + key, value));
+                }
+                index++;
+            }
         }
         Path pending = null;
         try {
@@ -1000,6 +1176,9 @@ public final class GifOverlay {
             @Override
             protected void done() {
                 try {
+                    if (disposed) {
+                        return;
+                    }
                     Animation loaded = get();
                     boolean firstImage = animation == null;
                     timer.stop();
@@ -1015,6 +1194,10 @@ public final class GifOverlay {
                         placeInitialOverlay();
                         window.setVisible(true);
                         clickThrough.setEnabled(tray != null);
+                        if (clickThrough.isEnabled() && !clickThrough.isSelected()
+                                && Boolean.parseBoolean(savedSettings.getProperty("clickThrough"))) {
+                            clickThrough.doClick(0);
+                        }
                     } else {
                         resizeOverlay();
                     }
@@ -1049,7 +1232,7 @@ public final class GifOverlay {
         resolution.setSelectedItem(percent);
         scale.setValue(savedInt(prefix + "scale", 100));
         volume.setValue(savedInt(prefix + "volume", 100));
-        customDelay.setSelected(Boolean.parseBoolean(savedSettings.getProperty(prefix + "customDelay")));
+        customDelay.setSelected(Boolean.parseBoolean(setting(prefix + "customDelay")));
         delayMs.setValue(savedInt(prefix + "delayMs", 40));
         updateFrameTiming();
         for (String axis : List.of("x", "y")) {
@@ -1057,7 +1240,7 @@ public final class GifOverlay {
         }
         audio = replacement;
         sound.setEnabled(audio != null);
-        sound.setSelected(audio != null && Boolean.parseBoolean(savedSettings.getProperty(prefix + "sound")));
+        sound.setSelected(audio != null && Boolean.parseBoolean(setting(prefix + "sound")));
         volume.setEnabled(audio == null || applyVolume(audio));
         if (wav == null) {
             clearAudio();
@@ -1199,16 +1382,25 @@ public final class GifOverlay {
 
     private void close() {
         saveSettings();
-        timer.stop();
-        if (audio != null) {
-            audio.close();
+        if (bundled) {
+            disposeOverlay();
+        } else {
+            overlays.values().forEach(GifOverlay::disposeOverlay);
         }
         if (tray != null) {
             SystemTray.getSystemTray().remove(tray);
         }
-        window.dispose();
         controls.dispose();
         System.exit(0);
+    }
+
+    private void disposeOverlay() {
+        disposed = true;
+        timer.stop();
+        if (audio != null) {
+            audio.close();
+        }
+        window.dispose();
     }
 
     private final class Drawing extends JComponent {
