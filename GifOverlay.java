@@ -1516,31 +1516,35 @@ public final class GifOverlay {
         private static Animation readOverlay(File file, int percent) throws IOException {
             try (ZipFile zip = new ZipFile(file)) {
                 var timing = zip.getEntry("delays.txt");
-                if (timing == null) {
-                    throw new IOException("오버레이 프레임 간격 파일이 없습니다.");
-                }
-                String[] delays;
-                try (var input = zip.getInputStream(timing)) {
-                    byte[] bytes = input.readNBytes(8193);
-                    if (bytes.length > 8192) {
-                        throw new IOException("오버레이 프레임 간격 파일이 너무 큽니다.");
+                String[] delays = null;
+                if (timing != null) {
+                    try (var input = zip.getInputStream(timing)) {
+                        byte[] bytes = input.readNBytes(8193);
+                        if (bytes.length > 8192) {
+                            throw new IOException("오버레이 프레임 간격 파일이 너무 큽니다.");
+                        }
+                        delays = new String(bytes, java.nio.charset.StandardCharsets.US_ASCII)
+                                .strip().split("\\s+");
                     }
-                    delays = new String(bytes, java.nio.charset.StandardCharsets.US_ASCII)
-                            .strip().split("\\s+");
                 }
-                List<GifFrame> frames = new ArrayList<>(delays.length);
+                List<GifFrame> frames = new ArrayList<>();
                 long duration = 0;
                 long pixels = 0;
                 int width = 0;
                 int height = 0;
-                for (int index = 0; index < delays.length; index++) {
-                    int delay;
+                for (int index = 0; delays == null || index < delays.length; index++) {
+                    var entry = zip.getEntry("frames/" + index + ".png");
+                    if (delays == null && entry == null) {
+                        break;
+                    }
+                    int delay = 100;
                     try {
-                        delay = Integer.parseInt(delays[index]);
+                        if (delays != null) {
+                            delay = Integer.parseInt(delays[index]);
+                        }
                     } catch (NumberFormatException failure) {
                         throw new IOException("오버레이 프레임 간격이 올바르지 않습니다.", failure);
                     }
-                    var entry = zip.getEntry("frames/" + index + ".png");
                     if (delay <= 0 || delay > 60_000 || entry == null || entry.getSize() > 8_000_000) {
                         throw new IOException("올바르지 않은 오버레이 프레임 번호: " + index + ".");
                     }
@@ -1563,6 +1567,9 @@ public final class GifOverlay {
                         reader.dispose();
                     }
                     duration += delay * 1_000L;
+                }
+                if (frames.isEmpty()) {
+                    throw new IOException("첫 프레임 frames/0.png를 찾을 수 없습니다.");
                 }
                 return new Animation(frames, duration, width, height);
             }
