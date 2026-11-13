@@ -26,34 +26,39 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 import org.w3c.dom.Node;
 
 public final class GifOverlay {
+    private static final int RESIZE_HANDLE_SIZE = 16;
     private final String windowTitle = "GifOverlay " + UUID.randomUUID();
     private final JFrame window = new JFrame(windowTitle);
     private final JFrame controls = new JFrame("GifOverlay");
     private final Drawing drawing = new Drawing();
     private final Timer timer = new Timer(100, event -> advance());
-    private final JButton openGif = new JButton("Open animation…");
-    private final JCheckBox sound = new JCheckBox("Play sound");
-    private final JCheckBox clickThrough = new JCheckBox("Click through");
+    private final JButton openGif = new JButton("애니메이션 없음");
+    private final JCheckBox sound = new JCheckBox("소리 재생");
+    private final JCheckBox clickThrough = new JCheckBox("클릭 방지");
     private final JSpinner scale = new JSpinner(new SpinnerNumberModel(100, 10, 400, 5));
     private final JSlider volume = new JSlider(0, 100, 100);
     private final JLabel volumeLabel = new JLabel();
     private final Properties savedSettings = new Properties();
     private Path settingsFile;
-    private final JLabel animationFile = new JLabel("Animation: none");
-    private final JLabel soundFile = new JLabel("Sound: none");
+    private final JButton removeGif = new JButton("제거");
+    private final JButton openSound = new JButton("WAV 없음");
+    private final JButton removeSound = new JButton("제거");
     private boolean bundled;
     private boolean overlayZip;
     private final JComboBox<Integer> resolution = new JComboBox<>(new Integer[]{100, 90, 80, 75, 70, 60, 50, 40, 30, 25});
     private File loadedAnimationFile;
-    private final JCheckBox customDelay = new JCheckBox("Fixed ZIP frame delay");
+    private final JCheckBox customDelay = new JCheckBox("ZIP 프레임 간격 고정");
     private final JSpinner delayMs = new JSpinner(new SpinnerNumberModel(40, 1, 60_000, 1));
     private TrayIcon tray;
     private Clip audio;
     private Animation animation;
     private int frameIndex;
+    private boolean resizing;
     private WindowsStyles styles;
 
     public static void main(String[] args) {
+        Locale.setDefault(Locale.Category.DISPLAY, Locale.KOREAN);
+        JComponent.setDefaultLocale(Locale.KOREAN);
         boolean bundled = args.length == 1 && args[0].equals("--anoko");
         SwingUtilities.invokeLater(() -> new GifOverlay().start(bundled));
     }
@@ -74,17 +79,54 @@ public final class GifOverlay {
 
         MouseAdapter drag = new MouseAdapter() {
             private Point offset;
+            private Dimension startingSize;
+            private Point startingCursor;
+
+            @Override
+            public void mouseEntered(MouseEvent event) {
+                updateResizeFeedback(event);
+            }
+
+            @Override
+            public void mouseMoved(MouseEvent event) {
+                updateResizeFeedback(event);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent event) {
+                if (!resizing) {
+                    drawing.showResizeFeedback(false, false);
+                }
+            }
 
             @Override
             public void mousePressed(MouseEvent event) {
-                if (SwingUtilities.isLeftMouseButton(event)) {
+                if (!SwingUtilities.isLeftMouseButton(event) || clickThrough.isSelected()) {
+                    return;
+                }
+                if (!bundled && animation != null && drawing.isResizeHandle(event.getPoint())) {
+                    resizing = true;
+                    startingSize = drawing.getSize();
+                    startingCursor = event.getLocationOnScreen();
+                    drawing.showResizeFeedback(true, true);
+                } else {
                     offset = event.getPoint();
                 }
             }
 
             @Override
             public void mouseDragged(MouseEvent event) {
-                if (offset != null) {
+                if (resizing && animation != null) {
+                    Point cursor = event.getLocationOnScreen();
+                    double width = startingSize.width + cursor.x - startingCursor.x;
+                    double height = startingSize.height + cursor.y - startingCursor.y;
+                    double originalWidth = animation.width();
+                    double originalHeight = animation.height();
+                    // 드래그 방향을 이미지의 대각선에 맞춰 원본 비율을 유지한다.
+                    double factor = (width * originalWidth + height * originalHeight)
+                            / (originalWidth * originalWidth + originalHeight * originalHeight);
+                    scale.setValue(Math.clamp((int) Math.round(factor * 100), 10, 400));
+                } else if (offset != null) {
                     Point cursor = event.getLocationOnScreen();
                     window.setLocation(cursor.x - offset.x, cursor.y - offset.y);
                 }
@@ -92,18 +134,43 @@ public final class GifOverlay {
 
             @Override
             public void mouseReleased(MouseEvent event) {
-                if (offset != null) {
+                if (offset != null || resizing) {
+                    resizing = false;
                     saveSettings();
                 }
                 offset = null;
+                updateResizeFeedback(event);
+            }
+
+            private void updateResizeFeedback(MouseEvent event) {
+                boolean show = !bundled && animation != null && !clickThrough.isSelected()
+                        && drawing.contains(event.getPoint());
+                drawing.showResizeFeedback(show, show && drawing.isResizeHandle(event.getPoint()));
             }
         };
         drawing.addMouseListener(drag);
         drawing.addMouseMotionListener(drag);
 
+        openGif.setToolTipText("GIF 또는 오버레이 ZIP을 선택합니다.");
+        openSound.setToolTipText("재생할 WAV 파일을 선택합니다.");
+        removeGif.setToolTipText("현재 애니메이션을 화면에서 제거합니다.");
+        removeSound.setToolTipText("현재 소리를 멈추고 WAV 연결을 해제합니다.");
+        sound.setToolTipText("선택한 WAV를 반복 재생합니다.");
+        clickThrough.setToolTipText("오버레이 위의 클릭을 뒤에 있는 창으로 전달합니다.");
+        scale.setToolTipText("원본 대비 표시 크기를 조절합니다. 작게 표시할 때는 프레임 해상도도 낮추면 처리 부담을 줄일 수 있습니다.");
+        volume.setToolTipText("WAV 재생 볼륨을 조절합니다.");
+        resolution.setToolTipText("오버레이 ZIP의 프레임 해상도를 설정합니다. 표시 크기가 작다면 해상도를 낮춰 처리 부담을 줄일 수 있습니다.");
         openGif.addActionListener(event -> chooseGif());
-        JButton openSound = new JButton("Open WAV…");
         openSound.addActionListener(event -> chooseSound());
+        openGif.setHorizontalAlignment(SwingConstants.LEFT);
+        openSound.setHorizontalAlignment(SwingConstants.LEFT);
+        removeGif.setEnabled(false);
+        removeSound.setEnabled(false);
+        removeGif.addActionListener(event -> removeAnimation());
+        removeSound.addActionListener(event -> {
+            clearAudio();
+            saveSettings();
+        });
         sound.setEnabled(false);
         sound.addActionListener(event -> {
             if (sound.isSelected()) {
@@ -122,36 +189,37 @@ public final class GifOverlay {
                     styles = new WindowsStyles();
                 }
                 styles.setClickThrough(windowTitle, requested);
+                drawing.showResizeFeedback(false, false);
+                drawing.repaint();
             } catch (Throwable failure) {
                 clickThrough.setSelected(!requested);
-                showError("Could not change click-through mode", failure);
+                showError("클릭 방지 설정을 바꾸지 못했습니다.", failure);
             }
         });
 
         JPanel settings = new JPanel(new GridLayout(0, 2, 8, 8));
         settings.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        JPanel details = new JPanel(new GridLayout(0, 2, 12, 8));
+        JButton library = new JButton("보관함…");
+        library.setToolTipText("저장한 조합을 불러오거나 현재 조합을 저장합니다.");
         if (!bundled) {
-            settings.add(openGif);
-            settings.add(openSound);
-            JButton library = new JButton("Library…");
             library.addActionListener(event -> {
                 if (openGif.isEnabled()) {
                     showLibrary();
                 }
             });
-            settings.add(library);
-            settings.add(new JLabel());
-            customDelay.setToolTipText("Unchecked: use delays.txt");
-            delayMs.setToolTipText("Milliseconds per frame");
+            customDelay.setToolTipText("선택 해제 시 delays.txt의 간격을 사용합니다.");
+            delayMs.setToolTipText("프레임당 시간(밀리초)");
             delayMs.setEnabled(customDelay.isSelected());
             customDelay.addActionListener(event -> updateFrameTiming());
             delayMs.addChangeListener(event -> updateFrameTiming());
-            settings.add(customDelay);
-            settings.add(delayMs);
-            JLabel quality = new JLabel("Frame resolution (%)");
+            JLabel quality = new JLabel("프레임 해상도 (%)");
             quality.setLabelFor(resolution);
-            settings.add(quality);
-            settings.add(resolution);
+            quality.setToolTipText(resolution.getToolTipText());
+            details.add(quality);
+            details.add(resolution);
+            details.add(customDelay);
+            details.add(delayMs);
             resolution.addActionListener(event -> {
                 if (!resolution.isEnabled()) {
                     return;
@@ -163,11 +231,13 @@ public final class GifOverlay {
                 }
             });
         }
-        JLabel size = new JLabel("Size (%)");
+        JLabel size = new JLabel("크기 (%)");
         size.setLabelFor(scale);
+        size.setToolTipText(scale.getToolTipText());
         settings.add(size);
         settings.add(scale);
         volumeLabel.setLabelFor(volume);
+        volumeLabel.setToolTipText(volume.getToolTipText());
         updateVolumeLabel();
         volume.setEnabled(!bundled);
         volume.addChangeListener(event -> {
@@ -183,25 +253,58 @@ public final class GifOverlay {
         settings.add(volume);
         settings.add(sound);
         settings.add(clickThrough);
-        JButton exit = new JButton("Exit");
+        JButton minimize = new JButton("트레이로 최소화");
+        minimize.setToolTipText("재생을 계속하면서 설정 창을 트레이로 숨깁니다.");
+        minimize.addActionListener(event -> controls.setVisible(false));
+        JButton exit = new JButton("완전 종료");
+        exit.setToolTipText("재생을 멈추고 GifOverlay를 종료합니다.");
+        styleButton(exit, new Color(158, 46, 58));
         exit.addActionListener(event -> close());
-        settings.add(exit);
         scale.addChangeListener(event -> {
             resizeOverlay();
-            saveSettings();
+            if (!resizing) {
+                saveSettings();
+            }
         });
-        JLabel dropHint = new JLabel(bundled ? "Anoko — Papaya" : "Drop GIF, overlay ZIP or WAV here",
+        JLabel dropHint = new JLabel(bundled ? "Anoko — Papaya" : "GIF, 오버레이 ZIP 또는 WAV를 여기에 놓으세요.",
                 SwingConstants.CENTER);
         dropHint.setBorder(BorderFactory.createEmptyBorder(12, 12, 0, 12));
         JPanel content = new JPanel(new BorderLayout());
-        content.add(dropHint, BorderLayout.NORTH);
-        content.add(settings, BorderLayout.CENTER);
-        if (!bundled) {
-            JPanel files = new JPanel(new GridLayout(0, 1, 0, 4));
-            files.setBorder(BorderFactory.createEmptyBorder(0, 12, 12, 12));
-            files.add(animationFile);
-            files.add(soundFile);
-            content.add(files, BorderLayout.SOUTH);
+        if (bundled) {
+            settings.add(minimize);
+            settings.add(exit);
+            content.add(dropHint, BorderLayout.NORTH);
+            content.add(settings, BorderLayout.CENTER);
+        } else {
+            content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+            content.setBackground(new Color(243, 246, 251));
+            content.setBorder(BorderFactory.createEmptyBorder(16, 16, 12, 16));
+            JPanel files = new JPanel(new GridLayout(0, 1, 0, 8));
+            files.add(mediaRow(openGif, removeGif));
+            files.add(mediaRow(openSound, removeSound));
+            dropHint.setHorizontalAlignment(SwingConstants.LEFT);
+            dropHint.setBorder(null);
+            dropHint.setForeground(new Color(73, 89, 112));
+            files.add(dropHint);
+            for (JButton button : List.of(openGif, openSound, library)) {
+                styleButton(button, new Color(29, 78, 157));
+            }
+            for (JButton button : List.of(removeGif, removeSound)) {
+                styleButton(button, new Color(158, 46, 58));
+            }
+            styleButton(minimize, new Color(51, 65, 85));
+            settings.setBorder(null);
+            content.add(settingsSection("미디어", files, library));
+            content.add(Box.createVerticalStrut(10));
+            content.add(settingsSection("재생", settings, null));
+            content.add(Box.createVerticalStrut(10));
+            content.add(settingsSection("애니메이션 설정", details, null));
+            JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
+            footer.setOpaque(false);
+            footer.setAlignmentX(Component.LEFT_ALIGNMENT);
+            footer.add(minimize);
+            footer.add(exit);
+            content.add(footer);
             content.setTransferHandler(new TransferHandler() {
                 @Override
                 public boolean canImport(TransferSupport transfer) {
@@ -218,7 +321,7 @@ public final class GifOverlay {
                                 .getTransferData(DataFlavor.javaFileListFlavor);
                         return loadDroppedFiles(files);
                     } catch (IOException | UnsupportedFlavorException failure) {
-                        showError("Could not read dropped files", failure);
+                        showError("끌어 놓은 파일을 읽지 못했습니다.", failure);
                         return false;
                     }
                 }
@@ -229,14 +332,15 @@ public final class GifOverlay {
         controls.setLocationByPlatform(true);
 
         installTray();
+        minimize.setEnabled(tray != null);
         controls.setDefaultCloseOperation(tray == null
                 ? WindowConstants.EXIT_ON_CLOSE : WindowConstants.HIDE_ON_CLOSE);
         controls.setVisible(true);
         if (bundled) {
             loadBundledMedia();
         } else {
-            File lastAnimation = recentFile("animationFile", animationFile, "Animation");
-            File lastSound = recentFile("soundFile", soundFile, "Sound");
+            File lastAnimation = recentFile("animationFile", openGif, "애니메이션");
+            File lastSound = recentFile("soundFile", openSound, "WAV");
             if (lastAnimation != null) {
                 loadGif(lastAnimation);
             }
@@ -246,30 +350,122 @@ public final class GifOverlay {
         }
     }
 
-    private File recentFile(String key, JLabel label, String type) {
+    private void styleButton(JButton button, Color ink) {
+        button.setUI(new javax.swing.plaf.basic.BasicButtonUI() {
+            @Override
+            public void paint(Graphics graphics, JComponent component) {
+                Graphics2D canvas = (Graphics2D) graphics.create();
+                canvas.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                ButtonModel model = button.getModel();
+                Color fill = new Color(248, 250, 252);
+                if (model.isEnabled()) {
+                    if (model.isPressed() && model.isArmed()) {
+                        fill = new Color(219, 232, 250);
+                    } else if (model.isRollover()) {
+                        fill = new Color(234, 242, 255);
+                    }
+                }
+                canvas.setColor(fill);
+                canvas.fillRoundRect(0, 0, button.getWidth(), button.getHeight(), 12, 12);
+                canvas.setColor(button.hasFocus() ? new Color(36, 99, 187) : new Color(207, 218, 233));
+                canvas.drawRoundRect(0, 0, button.getWidth() - 1, button.getHeight() - 1, 12, 12);
+                canvas.dispose();
+                super.paint(graphics, component);
+            }
+        });
+        button.setOpaque(false);
+        button.setContentAreaFilled(false);
+        button.setRolloverEnabled(true);
+        button.setForeground(ink);
+        button.setBorder(BorderFactory.createEmptyBorder(7, 12, 7, 12));
+    }
+
+    private JPanel settingsSection(String title, JPanel body, JButton action) {
+        JPanel section = new JPanel(new BorderLayout(0, 10));
+        section.setAlignmentX(Component.LEFT_ALIGNMENT);
+        section.setBackground(Color.WHITE);
+        section.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(216, 224, 235)),
+                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
+        JPanel heading = new JPanel(new BorderLayout(8, 0));
+        heading.setOpaque(false);
+        JLabel label = new JLabel(title);
+        label.setForeground(new Color(26, 44, 70));
+        label.setFont(label.getFont().deriveFont(Font.BOLD, 14f));
+        heading.add(label, BorderLayout.CENTER);
+        if (action != null) {
+            heading.add(action, BorderLayout.EAST);
+        }
+        body.setOpaque(false);
+        section.add(heading, BorderLayout.NORTH);
+        section.add(body, BorderLayout.CENTER);
+        return section;
+    }
+
+    private JPanel mediaRow(JButton file, JButton remove) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.add(file, BorderLayout.CENTER);
+        row.add(remove, BorderLayout.EAST);
+        return row;
+    }
+
+    private void removeAnimation() {
+        timer.stop();
+        resizing = false;
+        drawing.showResizeFeedback(false, false);
+        window.setVisible(false);
+        animation = null;
+        loadedAnimationFile = null;
+        overlayZip = false;
+        frameIndex = 0;
+        clickThrough.setEnabled(false);
+        savedSettings.remove("animationFile");
+        openGif.setText("애니메이션 없음");
+        openGif.setToolTipText("GIF 또는 오버레이 ZIP을 선택합니다.");
+        removeGif.setEnabled(false);
+        saveSettings();
+    }
+
+    private void clearAudio() {
+        if (audio != null) {
+            audio.close();
+        }
+        audio = null;
+        sound.setSelected(false);
+        sound.setEnabled(false);
+        volume.setEnabled(true);
+        savedSettings.remove("soundFile");
+        openSound.setText("WAV 없음");
+        openSound.setToolTipText("재생할 WAV 파일을 선택합니다.");
+        removeSound.setEnabled(false);
+    }
+
+    private File recentFile(String key, JButton label, String type) {
         String path = savedSettings.getProperty(key);
         if (path == null || path.isBlank()) {
             return null;
         }
+        (label == openGif ? removeGif : removeSound).setEnabled(true);
         File file = new File(path);
         if (file.isFile()) {
             showMediaFile(label, type, file, "");
             return file;
         }
-        showMediaFile(label, type, file, " (missing)");
+        showMediaFile(label, type, file, " (파일 없음)");
         return null;
     }
 
-    private void showMediaFile(JLabel label, String type, File file, String status) {
+    private void showMediaFile(JButton label, String type, File file, String status) {
         String name = file.getName();
         if (name.length() > 38) {
             name = name.substring(0, 24) + "…" + name.substring(name.length() - 12);
         }
         label.setText(type + ": " + name + status);
-        label.setToolTipText(file.getAbsolutePath());
+        label.setToolTipText("눌러서 파일 변경 · " + file.getAbsolutePath());
     }
 
-    private void rememberMedia(String key, JLabel label, String type, File file) {
+    private void rememberMedia(String key, JButton label, String type, File file) {
         if (!bundled) {
             showMediaFile(label, type, file, "");
             savedSettings.setProperty(key, file.getAbsolutePath());
@@ -284,14 +480,71 @@ public final class GifOverlay {
                 .sorted(java.util.Comparator.comparing(savedSettings::getProperty))
                 .forEach(model::addElement);
         var list = new JList<>(model);
+        var previews = new java.util.HashMap<String, LibraryPreview>();
+        var previewTasks = new java.util.HashMap<String, SwingWorker<LibraryPreview, Void>>();
+        var dialog = new JDialog(controls, "보관함", true);
+        dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        dialog.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosed(java.awt.event.WindowEvent event) {
+                var tasks = List.copyOf(previewTasks.values());
+                previewTasks.clear();
+                tasks.forEach(task -> task.cancel(true));
+            }
+        });
+        java.util.function.Consumer<String> refreshPreview = key -> {
+            String prefix = key.substring(0, key.length() - 4);
+            String path = savedSettings.getProperty(prefix + "animationFile", "");
+            previews.remove(key);
+            list.repaint();
+            var task = new SwingWorker<LibraryPreview, Void>() {
+                @Override
+                protected LibraryPreview doInBackground() {
+                    return readLibraryPreview(new File(path));
+                }
+
+                @Override
+                protected void done() {
+                    if (previewTasks.get(key) != this) {
+                        return;
+                    }
+                    previewTasks.remove(key);
+                    try {
+                        previews.put(key, get());
+                        list.repaint();
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                    } catch (java.util.concurrent.ExecutionException failure) {
+                        previews.put(key, new LibraryPreview(null, "미리보기 없음"));
+                        list.repaint();
+                    }
+                }
+            };
+            var previous = previewTasks.put(key, task);
+            if (previous != null) {
+                previous.cancel(true);
+            }
+            task.execute();
+        };
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        list.setVisibleRowCount(8);
-        list.setCellRenderer((view, key, index, selected, focused) ->
-                new DefaultListCellRenderer().getListCellRendererComponent(
-                        view, savedSettings.getProperty(key), index, selected, focused));
-        var dialog = new JDialog(controls, "Library", true);
+        list.setVisibleRowCount(5);
+        list.setFixedCellHeight(72);
+        var renderer = new DefaultListCellRenderer();
+        list.setCellRenderer((view, key, index, selected, focused) -> {
+            String prefix = key.substring(0, key.length() - 4);
+            var preview = previews.get(key);
+            String status = preview == null ? "불러오는 중" : preview.status();
+            String name = savedSettings.getProperty(key);
+            renderer.getListCellRendererComponent(view,
+                    status.isEmpty() ? name : name + " · " + status, index, selected, focused);
+            boolean hasWav = !savedSettings.getProperty(prefix + "soundFile", "").isBlank();
+            renderer.setIcon(new LibraryPreviewIcon(preview == null ? null : preview.image(), hasWav));
+            renderer.setIconTextGap(10);
+            return renderer;
+        });
+        model.elements().asIterator().forEachRemaining(refreshPreview);
         var buttons = new JPanel();
-        JButton load = new JButton("Load");
+        JButton load = new JButton("불러오기");
         load.addActionListener(event -> {
             String key = list.getSelectedValue();
             if (key != null) {
@@ -300,7 +553,7 @@ public final class GifOverlay {
                 String wav = savedSettings.getProperty(prefix + "soundFile", "");
                 File soundPath = wav.isEmpty() ? null : new File(wav);
                 if (!image.isFile() || (soundPath != null && !soundPath.isFile())) {
-                    JOptionPane.showMessageDialog(dialog, "A saved file is missing. Use Relink to update its path.");
+                    JOptionPane.showMessageDialog(dialog, "저장한 파일을 찾을 수 없습니다. 경로 변경에서 다시 지정하세요.");
                     return;
                 }
                 dialog.dispose();
@@ -317,10 +570,10 @@ public final class GifOverlay {
                 }
             }
         });
-        JButton add = new JButton("Save current");
+        JButton add = new JButton("현재 조합 저장");
         add.setEnabled(animation != null);
         add.addActionListener(event -> {
-            String name = JOptionPane.showInputDialog(dialog, "Combination name");
+            String name = JOptionPane.showInputDialog(dialog, "조합 이름");
             if (name == null || name.isBlank()) {
                 return;
             }
@@ -335,14 +588,15 @@ public final class GifOverlay {
             }
             savedSettings.setProperty(prefix + "name", name.strip());
             model.addElement(prefix + "name");
+            refreshPreview.accept(prefix + "name");
             list.setSelectedIndex(model.size() - 1);
             saveSettings();
         });
-        JButton rename = new JButton("Rename");
+        JButton rename = new JButton("이름 변경");
         rename.addActionListener(event -> {
             String key = list.getSelectedValue();
             if (key != null) {
-                String name = JOptionPane.showInputDialog(dialog, "Combination name", savedSettings.getProperty(key));
+                String name = JOptionPane.showInputDialog(dialog, "조합 이름", savedSettings.getProperty(key));
                 if (name != null && !name.isBlank()) {
                     savedSettings.setProperty(key, name.strip());
                     list.repaint();
@@ -350,21 +604,21 @@ public final class GifOverlay {
                 }
             }
         });
-        JButton relink = new JButton("Relink");
+        JButton relink = new JButton("경로 변경");
         relink.addActionListener(event -> {
             String key = list.getSelectedValue();
             if (key == null) {
                 return;
             }
-            Object[] options = {"Animation", "WAV", "No WAV"};
-            int choice = JOptionPane.showOptionDialog(dialog, "Choose the file to replace", "Relink",
+            Object[] options = {"애니메이션", "WAV", "WAV 없음"};
+            int choice = JOptionPane.showOptionDialog(dialog, "경로를 변경할 파일을 선택하세요.", "경로 변경",
                     JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
             String prefix = key.substring(0, key.length() - 4);
             if (choice == 2) {
                 savedSettings.remove(prefix + "soundFile");
             } else if (choice >= 0) {
-                File file = choice == 0 ? chooseFile(dialog, "GIF or overlay ZIP", "gif", "zip")
-                        : chooseFile(dialog, "WAV audio", "wav");
+                File file = choice == 0 ? chooseFile(dialog, "GIF 또는 오버레이 ZIP", "gif", "zip")
+                        : chooseFile(dialog, "WAV 오디오", "wav");
                 if (file == null) {
                     return;
                 }
@@ -373,20 +627,41 @@ public final class GifOverlay {
             } else {
                 return;
             }
+            if (choice == 0) {
+                refreshPreview.accept(key);
+            }
+            list.repaint();
             saveSettings();
         });
-        JButton delete = new JButton("Delete");
+        JButton delete = new JButton("삭제");
+        load.setToolTipText("선택한 조합을 현재 오버레이에 적용합니다.");
+        add.setToolTipText("현재 파일과 재생 설정을 새 조합으로 저장합니다.");
+        rename.setToolTipText("선택한 조합의 이름을 바꿉니다.");
+        relink.setToolTipText("선택한 조합의 파일 경로를 바꾸거나 WAV 연결을 해제합니다.");
+        delete.setToolTipText("선택한 조합을 보관함에서 삭제합니다.");
         delete.addActionListener(event -> {
             String key = list.getSelectedValue();
-            if (key != null && JOptionPane.showConfirmDialog(dialog, "Delete this saved combination?",
-                    "Library", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
+            if (key != null && JOptionPane.showConfirmDialog(dialog, "저장한 조합을 삭제할까요?",
+                    "보관함", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                 String prefix = key.substring(0, key.length() - 4);
                 savedSettings.keySet().removeIf(item -> item.toString().startsWith(prefix));
                 model.removeElement(key);
+                previews.remove(key);
+                var task = previewTasks.remove(key);
+                if (task != null) {
+                    task.cancel(true);
+                }
                 saveSettings();
             }
         });
         for (JButton button : List.of(load, add, rename, relink, delete)) {
+            Color ink = new Color(51, 65, 85);
+            if (button == load || button == add) {
+                ink = new Color(29, 78, 157);
+            } else if (button == delete) {
+                ink = new Color(158, 46, 58);
+            }
+            styleButton(button, ink);
             buttons.add(button);
         }
         dialog.add(new JScrollPane(list), BorderLayout.CENTER);
@@ -395,6 +670,92 @@ public final class GifOverlay {
         dialog.pack();
         dialog.setLocationRelativeTo(controls);
         dialog.setVisible(true);
+    }
+
+    private record LibraryPreview(BufferedImage image, String status) {}
+
+    private static LibraryPreview readLibraryPreview(File file) {
+        if (!file.isFile()) {
+            return new LibraryPreview(null, "파일 없음");
+        }
+        try {
+            BufferedImage image;
+            if (file.getName().toLowerCase(Locale.ROOT).endsWith(".overlay.zip")) {
+                try (ZipFile zip = new ZipFile(file)) {
+                    var frame = zip.getEntry("frames/0.png");
+                    if (frame == null) {
+                        return new LibraryPreview(null, "미리보기 없음");
+                    }
+                    try (var input = zip.getInputStream(frame);
+                         var imageInput = ImageIO.createImageInputStream(input)) {
+                        image = readPreviewFrame(imageInput);
+                    }
+                }
+            } else {
+                try (var input = ImageIO.createImageInputStream(file)) {
+                    image = readPreviewFrame(input);
+                }
+            }
+            return new LibraryPreview(image, image == null ? "미리보기 없음" : "");
+        } catch (IOException | IllegalArgumentException failure) {
+            return new LibraryPreview(null, "미리보기 없음");
+        }
+    }
+
+    private static BufferedImage readPreviewFrame(ImageInputStream input) throws IOException {
+        if (input == null) {
+            return null;
+        }
+        var readers = ImageIO.getImageReaders(input);
+        if (!readers.hasNext()) {
+            return null;
+        }
+        var reader = readers.next();
+        try {
+            reader.setInput(input, true, true);
+            var parameters = reader.getDefaultReadParam();
+            int step = Math.max(1, Math.max(reader.getWidth(0), reader.getHeight(0)) / 64);
+            parameters.setSourceSubsampling(step, step, 0, 0);
+            return reader.read(0, parameters);
+        } finally {
+            reader.dispose();
+        }
+    }
+
+    private record LibraryPreviewIcon(BufferedImage image, boolean hasWav) implements Icon {
+        @Override
+        public int getIconWidth() {
+            return 80;
+        }
+
+        @Override
+        public int getIconHeight() {
+            return 60;
+        }
+
+        @Override
+        public void paintIcon(Component component, Graphics graphics, int x, int y) {
+            Graphics2D canvas = (Graphics2D) graphics.create();
+            canvas.setColor(new Color(235, 240, 248));
+            canvas.fillRoundRect(x, y, getIconWidth(), getIconHeight(), 8, 8);
+            if (image != null) {
+                double scale = Math.min((double) getIconWidth() / image.getWidth(),
+                        (double) getIconHeight() / image.getHeight());
+                int width = Math.max(1, (int) Math.round(image.getWidth() * scale));
+                int height = Math.max(1, (int) Math.round(image.getHeight() * scale));
+                canvas.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                canvas.drawImage(image, x + (getIconWidth() - width) / 2,
+                        y + (getIconHeight() - height) / 2, width, height, null);
+            }
+            if (hasWav) {
+                int badgeX = x + getIconWidth() - 23;
+                canvas.setColor(new Color(29, 78, 157));
+                canvas.fillRoundRect(badgeX, y + 3, 20, 20, 6, 6);
+                canvas.setColor(Color.WHITE);
+                canvas.drawString("♪", badgeX + 6, y + 18);
+            }
+            canvas.dispose();
+        }
     }
 
     private void restoreSettings() {
@@ -451,7 +812,7 @@ public final class GifOverlay {
                 Files.move(pending, settingsFile, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException failure) {
-            System.err.println("Could not save overlay settings: " + failure.getMessage());
+            System.err.println("오버레이 설정을 저장하지 못했습니다. " + failure.getMessage());
         } finally {
             if (pending != null) {
                 try {
@@ -464,7 +825,7 @@ public final class GifOverlay {
     }
 
     private void updateVolumeLabel() {
-        volumeLabel.setText("Volume (" + volume.getValue() + "%)");
+        volumeLabel.setText("볼륨 (" + volume.getValue() + "%)");
     }
 
     private boolean applyVolume(Clip clip) {
@@ -492,7 +853,7 @@ public final class GifOverlay {
             loadGif(assets.resolve("Anoko.overlay.zip").toFile());
             loadSound(assets.resolve("Anoko.wav").toFile());
         } catch (Exception failure) {
-            showError("Could not locate bundled Anoko files", failure);
+            showError("Anoko 번들 파일을 찾을 수 없습니다.", failure);
         }
     }
 
@@ -509,10 +870,10 @@ public final class GifOverlay {
         graphics.dispose();
 
         PopupMenu menu = new PopupMenu();
-        MenuItem settings = new MenuItem("Settings");
+        MenuItem settings = new MenuItem("설정");
         settings.addActionListener(event -> SwingUtilities.invokeLater(this::showControls));
         menu.add(settings);
-        MenuItem exit = new MenuItem("Exit");
+        MenuItem exit = new MenuItem("완전 종료");
         exit.addActionListener(event -> SwingUtilities.invokeLater(this::close));
         menu.add(exit);
 
@@ -569,7 +930,7 @@ public final class GifOverlay {
     }
 
     private void chooseGif() {
-        File selected = chooseFile("GIF or overlay ZIP", "gif", "zip");
+        File selected = chooseFile("GIF 또는 오버레이 ZIP", "gif", "zip");
         if (selected != null) {
             loadGif(selected);
         }
@@ -591,11 +952,11 @@ public final class GifOverlay {
             }
         }
         if (gif == null && wav == null) {
-            showError("No supported file", new IOException("Drop a GIF, overlay ZIP or WAV file."));
+            showError("지원하는 파일이 없습니다.", new IOException("GIF, 오버레이 ZIP 또는 WAV 파일을 놓으세요."));
             return false;
         }
-        if (gif != null && !openGif.isEnabled()) {
-            showError("GIF is still loading", new IOException("Drop the files again when it finishes."));
+        if ((gif != null && !openGif.isEnabled()) || (wav != null && !openSound.isEnabled())) {
+            showError("파일을 불러오는 중입니다.", new IOException("불러오기가 끝난 뒤 파일을 다시 놓으세요."));
             return false;
         }
         if (gif != null) {
@@ -613,6 +974,11 @@ public final class GifOverlay {
 
     private void loadGif(File selected, String preset, File wav) {
         openGif.setEnabled(false);
+        removeGif.setEnabled(false);
+        if (preset != null) {
+            removeSound.setEnabled(false);
+            openSound.setEnabled(false);
+        }
         resolution.setEnabled(false);
         int percent = preset != null ? savedInt(preset + "resolution", 100)
                 : bundled ? 100 : (Integer) resolution.getSelectedItem();
@@ -653,12 +1019,12 @@ public final class GifOverlay {
                         resizeOverlay();
                     }
                     displayFrame();
-                    rememberMedia("animationFile", animationFile, "Animation", selected);
+                    rememberMedia("animationFile", openGif, "애니메이션", selected);
                 } catch (ExecutionException failure) {
                     if (!bundled && animation == null) {
-                        showMediaFile(animationFile, "Animation", selected, " (load failed)");
+                        showMediaFile(openGif, "애니메이션", selected, " (불러오기 실패)");
                     }
-                    showError("Could not open animation", failure.getCause());
+                    showError("애니메이션을 열지 못했습니다.", failure.getCause());
                 } catch (InterruptedException failure) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -666,6 +1032,9 @@ public final class GifOverlay {
                         preparedSound.close();
                     }
                     openGif.setEnabled(true);
+                    removeGif.setEnabled(!openGif.getText().equals("애니메이션 없음"));
+                    openSound.setEnabled(true);
+                    removeSound.setEnabled(!openSound.getText().equals("WAV 없음"));
                     resolution.setEnabled(true);
                 }
             }
@@ -691,12 +1060,10 @@ public final class GifOverlay {
         sound.setSelected(audio != null && Boolean.parseBoolean(savedSettings.getProperty(prefix + "sound")));
         volume.setEnabled(audio == null || applyVolume(audio));
         if (wav == null) {
-            savedSettings.remove("soundFile");
-            soundFile.setText("Sound: none");
-            soundFile.setToolTipText(null);
+            clearAudio();
         } else {
             savedSettings.setProperty("soundFile", wav.getAbsolutePath());
-            showMediaFile(soundFile, "Sound", wav, "");
+            showMediaFile(openSound, "WAV", wav, "");
             if (sound.isSelected()) {
                 audio.loop(Clip.LOOP_CONTINUOUSLY);
             }
@@ -790,7 +1157,7 @@ public final class GifOverlay {
     }
 
     private void chooseSound() {
-        File selected = chooseFile("WAV audio", "wav");
+        File selected = chooseFile("WAV 오디오", "wav");
         if (selected != null) {
             loadSound(selected);
         }
@@ -811,15 +1178,17 @@ public final class GifOverlay {
             audio = replacement;
             sound.setEnabled(true);
             volume.setEnabled(volumeAvailable);
-            rememberMedia("soundFile", soundFile, "Sound", selected);
+            rememberMedia("soundFile", openSound, "WAV", selected);
+            removeSound.setEnabled(true);
         } catch (Exception failure) {
             if (!bundled && audio == null) {
-                showMediaFile(soundFile, "Sound", selected, " (load failed)");
+                showMediaFile(openSound, "WAV", selected, " (불러오기 실패)");
+                removeSound.setEnabled(true);
             }
             if (replacement != null) {
                 replacement.close();
             }
-            showError("Could not open WAV", failure);
+            showError("WAV를 열지 못했습니다.", failure);
         }
     }
 
@@ -843,6 +1212,21 @@ public final class GifOverlay {
     }
 
     private final class Drawing extends JComponent {
+        private boolean showBorder;
+
+        private boolean isResizeHandle(Point point) {
+            return contains(point) && point.x >= getWidth() - Math.max(1, Math.min(RESIZE_HANDLE_SIZE, getWidth() / 2))
+                    && point.y >= getHeight() - Math.max(1, Math.min(RESIZE_HANDLE_SIZE, getHeight() / 2));
+        }
+
+        private void showResizeFeedback(boolean show, boolean overHandle) {
+            setCursor(Cursor.getPredefinedCursor(overHandle ? Cursor.SE_RESIZE_CURSOR : Cursor.DEFAULT_CURSOR));
+            if (showBorder != show) {
+                showBorder = show;
+                repaint();
+            }
+        }
+
         @Override
         protected void paintComponent(Graphics graphics) {
             Graphics2D canvas = (Graphics2D) graphics.create();
@@ -854,6 +1238,26 @@ public final class GifOverlay {
                         RenderingHints.VALUE_INTERPOLATION_BILINEAR);
                 canvas.drawImage(animation.frames().get(frameIndex).image(),
                         0, 0, getWidth(), getHeight(), null);
+                if (!bundled && !clickThrough.isSelected()) {
+                    if (showBorder) {
+                        canvas.setColor(Color.BLACK);
+                        canvas.drawRect(0, 0, getWidth() - 1, getHeight() - 1);
+                        canvas.setColor(Color.WHITE);
+                        canvas.drawRect(1, 1, getWidth() - 3, getHeight() - 3);
+                    }
+                    // 투명한 모서리에서도 손잡이가 마우스 입력을 받도록 항상 그린다.
+                    int grip = Math.max(1, Math.min(RESIZE_HANDLE_SIZE, Math.min(getWidth(), getHeight()) / 2));
+                    int x = getWidth() - grip;
+                    int y = getHeight() - grip;
+                    canvas.setColor(new Color(37, 87, 172));
+                    canvas.fillRect(x, y, grip, grip);
+                    canvas.setColor(Color.BLACK);
+                    canvas.drawRect(x, y, grip - 1, grip - 1);
+                    canvas.setColor(Color.WHITE);
+                    if (grip >= 8) {
+                        canvas.drawLine(x + 3, y + grip - 4, x + grip - 4, y + 3);
+                    }
+                }
             }
             canvas.dispose();
         }
@@ -873,7 +1277,7 @@ public final class GifOverlay {
             ImageReader reader = ImageIO.getImageReadersByFormatName("gif").next();
             try (ImageInputStream input = ImageIO.createImageInputStream(file)) {
                 if (input == null) {
-                    throw new IOException("Cannot read " + file.getName());
+                    throw new IOException("파일을 읽을 수 없습니다. " + file.getName());
                 }
                 reader.setInput(input);
                 Node stream = reader.getStreamMetadata().getAsTree("javax_imageio_gif_stream_1.0");
@@ -883,7 +1287,7 @@ public final class GifOverlay {
                 int count = reader.getNumImages(true);
                 if (width <= 0 || height <= 0 || count <= 0
                         || (long) width * height > 120_000_000L / count) {
-                    throw new IOException("GIF is empty or too large to decode.");
+                    throw new IOException("GIF가 비어 있거나 너무 큽니다.");
                 }
                 BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
                 List<GifFrame> frames = new ArrayList<>(count);
@@ -921,13 +1325,13 @@ public final class GifOverlay {
             try (ZipFile zip = new ZipFile(file)) {
                 var timing = zip.getEntry("delays.txt");
                 if (timing == null) {
-                    throw new IOException("Overlay timing file is missing.");
+                    throw new IOException("오버레이 프레임 간격 파일이 없습니다.");
                 }
                 String[] delays;
                 try (var input = zip.getInputStream(timing)) {
                     byte[] bytes = input.readNBytes(8193);
                     if (bytes.length > 8192) {
-                        throw new IOException("Overlay timing file is too large.");
+                        throw new IOException("오버레이 프레임 간격 파일이 너무 큽니다.");
                     }
                     delays = new String(bytes, java.nio.charset.StandardCharsets.US_ASCII)
                             .strip().split("\\s+");
@@ -942,11 +1346,11 @@ public final class GifOverlay {
                     try {
                         delay = Integer.parseInt(delays[index]);
                     } catch (NumberFormatException failure) {
-                        throw new IOException("Invalid overlay frame delay.", failure);
+                        throw new IOException("오버레이 프레임 간격이 올바르지 않습니다.", failure);
                     }
                     var entry = zip.getEntry("frames/" + index + ".png");
                     if (delay <= 0 || delay > 60_000 || entry == null || entry.getSize() > 8_000_000) {
-                        throw new IOException("Invalid overlay frame " + index + ".");
+                        throw new IOException("올바르지 않은 오버레이 프레임 번호: " + index + ".");
                     }
                     ImageReader reader = ImageIO.getImageReadersByFormatName("png").next();
                     try (var bytes = zip.getInputStream(entry);
@@ -960,7 +1364,7 @@ public final class GifOverlay {
                         }
                         pixels += (long) frameWidth * frameHeight;
                         if (frameWidth != width || frameHeight != height || pixels > 120_000_000) {
-                            throw new IOException("Overlay frames are too large or have different sizes.");
+                            throw new IOException("오버레이 프레임이 너무 크거나 프레임 크기가 서로 다릅니다.");
                         }
                         frames.add(new GifFrame(scaledFrame(reader.read(0), percent, false), delay));
                     } finally {
@@ -1041,7 +1445,7 @@ public final class GifOverlay {
                 }
                 MemorySegment handle = (MemorySegment) findWindow.invokeExact(MemorySegment.NULL, name);
                 if (handle.equals(MemorySegment.NULL)) {
-                    throw new IOException("Overlay window was not found.");
+                    throw new IOException("오버레이 창을 찾을 수 없습니다.");
                 }
                 int oldStyle = (int) getStyle.invokeExact(handle, GWL_EXSTYLE);
                 int desired = enabled ? oldStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT
@@ -1050,7 +1454,7 @@ public final class GifOverlay {
                 int actual = (int) getStyle.invokeExact(handle, GWL_EXSTYLE);
                 if ((actual & WS_EX_TRANSPARENT) != (desired & WS_EX_TRANSPARENT)
                         || (enabled && (actual & WS_EX_LAYERED) == 0)) {
-                    throw new IOException("Windows did not apply the requested window style.");
+                    throw new IOException("Windows에서 요청한 창 설정을 적용하지 못했습니다.");
                 }
             }
         }
