@@ -158,7 +158,7 @@ public final class GifOverlay {
         settings.add(scale);
         volumeLabel.setLabelFor(volume);
         updateVolumeLabel();
-        volume.setEnabled(false);
+        volume.setEnabled(!bundled);
         volume.addChangeListener(event -> {
             updateVolumeLabel();
             if (audio != null) {
