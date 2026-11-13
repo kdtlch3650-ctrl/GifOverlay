@@ -133,6 +133,14 @@ public final class GifOverlay {
         if (!bundled) {
             settings.add(openGif);
             settings.add(openSound);
+            JButton library = new JButton("Library…");
+            library.addActionListener(event -> {
+                if (openGif.isEnabled()) {
+                    showLibrary();
+                }
+            });
+            settings.add(library);
+            settings.add(new JLabel());
             customDelay.setToolTipText("Unchecked: use delays.txt");
             delayMs.setToolTipText("Milliseconds per frame");
             delayMs.setEnabled(customDelay.isSelected());
@@ -145,6 +153,9 @@ public final class GifOverlay {
             settings.add(quality);
             settings.add(resolution);
             resolution.addActionListener(event -> {
+                if (!resolution.isEnabled()) {
+                    return;
+                }
                 if (loadedAnimationFile != null) {
                     loadGif(loadedAnimationFile);
                 } else {
@@ -264,6 +275,126 @@ public final class GifOverlay {
             savedSettings.setProperty(key, file.getAbsolutePath());
             saveSettings();
         }
+    }
+
+    private void showLibrary() {
+        var model = new DefaultListModel<String>();
+        savedSettings.stringPropertyNames().stream()
+                .filter(key -> key.startsWith("preset.") && key.endsWith(".name"))
+                .sorted(java.util.Comparator.comparing(savedSettings::getProperty))
+                .forEach(model::addElement);
+        var list = new JList<>(model);
+        list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        list.setVisibleRowCount(8);
+        list.setCellRenderer((view, key, index, selected, focused) ->
+                new DefaultListCellRenderer().getListCellRendererComponent(
+                        view, savedSettings.getProperty(key), index, selected, focused));
+        var dialog = new JDialog(controls, "Library", true);
+        var buttons = new JPanel();
+        JButton load = new JButton("Load");
+        load.addActionListener(event -> {
+            String key = list.getSelectedValue();
+            if (key != null) {
+                String prefix = key.substring(0, key.length() - 4);
+                File image = new File(savedSettings.getProperty(prefix + "animationFile", ""));
+                String wav = savedSettings.getProperty(prefix + "soundFile", "");
+                File soundPath = wav.isEmpty() ? null : new File(wav);
+                if (!image.isFile() || (soundPath != null && !soundPath.isFile())) {
+                    JOptionPane.showMessageDialog(dialog, "A saved file is missing. Use Relink to update its path.");
+                    return;
+                }
+                dialog.dispose();
+                loadGif(image, prefix, soundPath);
+            }
+        });
+        list.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                int index = list.locationToIndex(event.getPoint());
+                if (event.getClickCount() == 2 && index >= 0
+                        && list.getCellBounds(index, index).contains(event.getPoint())) {
+                    load.doClick();
+                }
+            }
+        });
+        JButton add = new JButton("Save current");
+        add.setEnabled(animation != null);
+        add.addActionListener(event -> {
+            String name = JOptionPane.showInputDialog(dialog, "Combination name");
+            if (name == null || name.isBlank()) {
+                return;
+            }
+            saveSettings();
+            String prefix = "preset." + UUID.randomUUID() + ".";
+            for (String key : List.of("animationFile", "soundFile", "x", "y", "scale", "volume",
+                    "sound", "resolution", "customDelay", "delayMs")) {
+                String value = savedSettings.getProperty(key);
+                if (value != null && (!key.equals("soundFile") || audio != null)) {
+                    savedSettings.setProperty(prefix + key, value);
+                }
+            }
+            savedSettings.setProperty(prefix + "name", name.strip());
+            model.addElement(prefix + "name");
+            list.setSelectedIndex(model.size() - 1);
+            saveSettings();
+        });
+        JButton rename = new JButton("Rename");
+        rename.addActionListener(event -> {
+            String key = list.getSelectedValue();
+            if (key != null) {
+                String name = JOptionPane.showInputDialog(dialog, "Combination name", savedSettings.getProperty(key));
+                if (name != null && !name.isBlank()) {
+                    savedSettings.setProperty(key, name.strip());
+                    list.repaint();
+                    saveSettings();
+                }
+            }
+        });
+        JButton relink = new JButton("Relink");
+        relink.addActionListener(event -> {
+            String key = list.getSelectedValue();
+            if (key == null) {
+                return;
+            }
+            Object[] options = {"Animation", "WAV", "No WAV"};
+            int choice = JOptionPane.showOptionDialog(dialog, "Choose the file to replace", "Relink",
+                    JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
+            String prefix = key.substring(0, key.length() - 4);
+            if (choice == 2) {
+                savedSettings.remove(prefix + "soundFile");
+            } else if (choice >= 0) {
+                File file = choice == 0 ? chooseFile(dialog, "GIF or overlay ZIP", "gif", "zip")
+                        : chooseFile(dialog, "WAV audio", "wav");
+                if (file == null) {
+                    return;
+                }
+                savedSettings.setProperty(prefix + (choice == 0 ? "animationFile" : "soundFile"),
+                        file.getAbsolutePath());
+            } else {
+                return;
+            }
+            saveSettings();
+        });
+        JButton delete = new JButton("Delete");
+        delete.addActionListener(event -> {
+            String key = list.getSelectedValue();
+            if (key != null && JOptionPane.showConfirmDialog(dialog, "Delete this saved combination?",
+                    "Library", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
+                String prefix = key.substring(0, key.length() - 4);
+                savedSettings.keySet().removeIf(item -> item.toString().startsWith(prefix));
+                model.removeElement(key);
+                saveSettings();
+            }
+        });
+        for (JButton button : List.of(load, add, rename, relink, delete)) {
+            buttons.add(button);
+        }
+        dialog.add(new JScrollPane(list), BorderLayout.CENTER);
+        dialog.add(buttons, BorderLayout.SOUTH);
+        dialog.getRootPane().setDefaultButton(load);
+        dialog.pack();
+        dialog.setLocationRelativeTo(controls);
+        dialog.setVisible(true);
     }
 
     private void restoreSettings() {
@@ -403,6 +534,10 @@ public final class GifOverlay {
     }
 
     private File chooseFile(String type, String... extensions) {
+        return chooseFile(controls, type, extensions);
+    }
+
+    private File chooseFile(Component owner, String type, String... extensions) {
         String mediaKey = extensions[0].equals("wav") ? "soundFile" : "animationFile";
         String otherKey = mediaKey.equals("soundFile") ? "animationFile" : "soundFile";
         File directory = mediaDirectory(mediaKey);
@@ -420,7 +555,7 @@ public final class GifOverlay {
         }
         JFileChooser picker = new JFileChooser(directory);
         picker.setFileFilter(new FileNameExtensionFilter(type, extensions));
-        return picker.showOpenDialog(controls) == JFileChooser.APPROVE_OPTION
+        return picker.showOpenDialog(owner) == JFileChooser.APPROVE_OPTION
                 ? picker.getSelectedFile() : null;
     }
 
@@ -473,13 +608,27 @@ public final class GifOverlay {
     }
 
     private void loadGif(File selected) {
+        loadGif(selected, null, null);
+    }
+
+    private void loadGif(File selected, String preset, File wav) {
         openGif.setEnabled(false);
         resolution.setEnabled(false);
-        int percent = bundled ? 100 : (Integer) resolution.getSelectedItem();
+        int percent = preset != null ? savedInt(preset + "resolution", 100)
+                : bundled ? 100 : (Integer) resolution.getSelectedItem();
         new SwingWorker<Animation, Void>() {
+            private Clip preparedSound;
+
             @Override
-            protected Animation doInBackground() throws IOException {
-                return Animation.read(selected, percent);
+            protected Animation doInBackground() throws Exception {
+                Animation decoded = Animation.read(selected, percent);
+                if (wav != null) {
+                    try (AudioInputStream stream = AudioSystem.getAudioInputStream(wav)) {
+                        preparedSound = AudioSystem.getClip();
+                        preparedSound.open(stream);
+                    }
+                }
+                return decoded;
             }
 
             @Override
@@ -492,7 +641,11 @@ public final class GifOverlay {
                     loadedAnimationFile = selected;
                     overlayZip = selected.getName().toLowerCase(Locale.ROOT).endsWith(".overlay.zip");
                     frameIndex = 0;
-                    if (firstImage) {
+                    if (preset != null) {
+                        applyPreset(preset, percent, wav, preparedSound);
+                        preparedSound = null;
+                    }
+                    if (firstImage || preset != null) {
                         placeInitialOverlay();
                         window.setVisible(true);
                         clickThrough.setEnabled(tray != null);
@@ -509,11 +662,45 @@ public final class GifOverlay {
                 } catch (InterruptedException failure) {
                     Thread.currentThread().interrupt();
                 } finally {
+                    if (preparedSound != null) {
+                        preparedSound.close();
+                    }
                     openGif.setEnabled(true);
                     resolution.setEnabled(true);
                 }
             }
         }.execute();
+    }
+
+    private void applyPreset(String prefix, int percent, File wav, Clip replacement) {
+        if (audio != null) {
+            audio.close();
+        }
+        audio = null;
+        resolution.setSelectedItem(percent);
+        scale.setValue(savedInt(prefix + "scale", 100));
+        volume.setValue(savedInt(prefix + "volume", 100));
+        customDelay.setSelected(Boolean.parseBoolean(savedSettings.getProperty(prefix + "customDelay")));
+        delayMs.setValue(savedInt(prefix + "delayMs", 40));
+        updateFrameTiming();
+        for (String axis : List.of("x", "y")) {
+            savedSettings.setProperty(axis, Integer.toString(savedInt(prefix + axis, Integer.MIN_VALUE)));
+        }
+        audio = replacement;
+        sound.setEnabled(audio != null);
+        sound.setSelected(audio != null && Boolean.parseBoolean(savedSettings.getProperty(prefix + "sound")));
+        volume.setEnabled(audio == null || applyVolume(audio));
+        if (wav == null) {
+            savedSettings.remove("soundFile");
+            soundFile.setText("Sound: none");
+            soundFile.setToolTipText(null);
+        } else {
+            savedSettings.setProperty("soundFile", wav.getAbsolutePath());
+            showMediaFile(soundFile, "Sound", wav, "");
+            if (sound.isSelected()) {
+                audio.loop(Clip.LOOP_CONTINUOUSLY);
+            }
+        }
     }
 
     private void resizeOverlay() {
