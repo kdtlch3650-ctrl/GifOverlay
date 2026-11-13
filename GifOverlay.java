@@ -49,6 +49,7 @@ public final class GifOverlay {
     private final JCheckBox clickThrough = new JCheckBox("클릭 방지");
     private final JSpinner scale = new JSpinner(new SpinnerNumberModel(100, 10, 400, 5));
     private final JSlider volume = new JSlider(0, 100, 100);
+    private final JSlider opacity = new JSlider(10, 100, 100);
     private final JLabel volumeLabel = new JLabel();
     private final Properties savedSettings = new Properties();
     private Path settingsFile;
@@ -402,6 +403,21 @@ public final class GifOverlay {
         });
         settings.add(volumeLabel);
         settings.add(volume);
+        if (!bundled) {
+            JLabel opacityLabel = new JLabel("불투명도 (" + opacity.getValue() + "%)");
+            opacityLabel.setLabelFor(opacity);
+            opacity.setToolTipText("값을 낮추면 이미지가 옅어져 뒤쪽 창이 더 잘 보입니다.");
+            opacityLabel.setToolTipText(opacity.getToolTipText());
+            opacity.addChangeListener(event -> {
+                opacityLabel.setText("불투명도 (" + opacity.getValue() + "%)");
+                drawing.repaint();
+                if (!opacity.getValueIsAdjusting()) {
+                    saveSettings();
+                }
+            });
+            settings.add(opacityLabel);
+            settings.add(opacity);
+        }
         settings.add(sound);
         settings.add(clickThrough);
         styleButton(exit, new Color(158, 46, 58));
@@ -721,7 +737,7 @@ public final class GifOverlay {
             }
             saveSettings();
             String prefix = "preset." + UUID.randomUUID() + ".";
-            for (String key : List.of("animationFile", "soundFile", "x", "y", "scale", "volume",
+            for (String key : List.of("animationFile", "soundFile", "x", "y", "scale", "volume", "opacity",
                     "sound", "resolution", "customDelay", "delayMs")) {
                 String value = savedSettings.getProperty(key);
                 if (value != null && (!key.equals("soundFile") || audio != null)) {
@@ -914,6 +930,7 @@ public final class GifOverlay {
     private void applySavedControls() {
         scale.setValue(Math.clamp(savedInt("scale", 100), 10, 400));
         volume.setValue(Math.clamp(savedInt("volume", 100), 0, 100));
+        opacity.setValue(Math.clamp(savedInt("opacity", 100), 10, 100));
         sound.setSelected(Boolean.parseBoolean(savedSettings.getProperty("sound", "false")));
         resolution.setSelectedItem(savedInt("resolution", 100));
         customDelay.setSelected(Boolean.parseBoolean(savedSettings.getProperty("customDelay", "false")));
@@ -941,6 +958,7 @@ public final class GifOverlay {
         savedSettings.setProperty("volume", Integer.toString(volume.getValue()));
         savedSettings.setProperty("sound", Boolean.toString(sound.isSelected()));
         if (!bundled) {
+            savedSettings.setProperty("opacity", Integer.toString(opacity.getValue()));
             savedSettings.setProperty("resolution", resolution.getSelectedItem().toString());
             savedSettings.setProperty("customDelay", Boolean.toString(customDelay.isSelected()));
             savedSettings.setProperty("delayMs", delayMs.getValue().toString());
@@ -1232,6 +1250,7 @@ public final class GifOverlay {
         resolution.setSelectedItem(percent);
         scale.setValue(savedInt(prefix + "scale", 100));
         volume.setValue(savedInt(prefix + "volume", 100));
+        opacity.setValue(Math.clamp(savedInt(prefix + "opacity", 100), 10, 100));
         customDelay.setSelected(Boolean.parseBoolean(setting(prefix + "customDelay")));
         delayMs.setValue(savedInt(prefix + "delayMs", 40));
         updateFrameTiming();
@@ -1428,8 +1447,10 @@ public final class GifOverlay {
             if (animation != null) {
                 canvas.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
                         RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                canvas.setComposite(AlphaComposite.Src.derive(opacity.getValue() / 100f));
                 canvas.drawImage(animation.frames().get(frameIndex).image(),
                         0, 0, getWidth(), getHeight(), null);
+                canvas.setComposite(AlphaComposite.Src);
                 if (!bundled && !clickThrough.isSelected()) {
                     if (showBorder) {
                         canvas.setColor(Color.BLACK);
