@@ -1,0 +1,10 @@
+/*
+!/.gitignore
+!/GifOverlay.java
+!/Run-GifOverlay.cmd
+!/README.md
+!/CHANGELOG.md
+!/AGENTS.md
+!/Images/
+/Images/*
+!/Images/.gitkeep
