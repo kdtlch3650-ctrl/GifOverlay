@@ -8,3 +8,8 @@
 !/Images/
 /Images/*
 !/Images/.gitkeep
+!/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/tag-version.yml

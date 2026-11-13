@@ -1,0 +1,32 @@
+name: Tag versions
+
+on:
+  push:
+    branches: [main]
+    paths: [CHANGELOG.md]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create tag for the latest recorded version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^## ([0-9]+\.[0-9]+\.[0-9]+)\r?$/\1/p' CHANGELOG.md | sed -n '1p')
+          if [[ -z "$version" ]]; then
+            echo "No version heading found."
+            exit 1
+          fi
+          tag="v$version"
+          if git ls-remote --exit-code origin "refs/tags/$tag"; then
+            echo "$tag already exists."
+          else
+            status=$?
+            if [[ "$status" != 2 ]]; then exit "$status"; fi
+            git push origin "HEAD:refs/tags/$tag"
+          fi
